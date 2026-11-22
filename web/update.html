@@ -1,0 +1,83 @@
+﻿<!doctype html>
+<html lang="uk">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Оновлення суфлера</title>
+<style>
+body { margin: 0 auto; max-width: 500px; padding: 80px 26px 36px; font: 16px/1.65 system-ui; background: #101114; color: #b3bbc8; color-scheme: dark; }
+h1 { font-size: 34px; font-weight: 600; letter-spacing: -.05em; color: #f5f5f7; line-height: 1.15; }
+strong { color: #d4f28a; }
+button { padding: 16px 24px; margin: 16px 0; width: 100%; font: inherit; font-weight: 600; border: 0; border-radius: 16px; background: #d4f28a; color: #1b2413; cursor: pointer; }
+button:disabled { opacity: .5; }
+a { color: #d4f28a; text-underline-offset: 5px; }
+#message { font-size: 14px; }
+</style>
+<h1>Оновлення суфлера</h1>
+<p>Версія на сервері: <strong id="availableVersion">перевіряємо…</strong>.</p>
+<p>Спочатку збережіть незбережені відео й зупиніть запис у всіх вікнах суфлера. Збережений текст і налаштування залишаться.</p>
+<button id="update" type="button">Перевірити та встановити оновлення</button>
+<p id="message" role="status">Для перевірки оновлень потрібне підключення до інтернету.</p>
+<p><a href="./">Повернутися до суфлера</a></p>
+<script>
+const button = document.querySelector('#update');
+const message = document.querySelector('#message');
+async function serverVersion() {
+    const response = await fetch(`./index.html?update=${Date.now()}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('Сервер недоступний. Увімкніть комп’ютер і запустіть web/launch.bat.');
+    const html = new DOMParser().parseFromString(await response.text(), 'text/html');
+    const version = html.querySelector('meta[name="app-version"]')?.content;
+    if (!version) throw new Error('Сервер повернув сторінку без версії суфлера. Перевірте адресу.');
+    document.querySelector('#availableVersion').textContent = version;
+    return version;
+}
+serverVersion().catch(() => {
+    document.querySelector('#availableVersion').textContent = 'сервер недоступний';
+    message.textContent = 'Підключіться до тієї самої Wi-Fi мережі, увімкніть комп’ютер і запустіть web/launch.bat.';
+});
+function workerVersion(worker) {
+    return new Promise((resolve, reject) => {
+        if (!worker) { reject(new Error('Немає активної автономної версії. Повторіть оновлення.')); return; }
+        const channel = new MessageChannel();
+        const timeout = setTimeout(() => { channel.port1.close(); reject(new Error('Не вдалося перевірити встановлену версію. Повторіть оновлення.')); }, 5000);
+        channel.port1.onmessage = event => { clearTimeout(timeout); channel.port1.close(); resolve(event.data.version); };
+        worker.postMessage({ type: 'GET_VERSION' }, [channel.port2]);
+    });
+}
+button.addEventListener('click', async () => {
+    button.disabled = true;
+    message.textContent = 'Завантажуємо оновлення…';
+    try {
+        if (!window.isSecureContext || !('serviceWorker' in navigator)) throw new Error('Потрібне HTTPS-з’єднання з довіреним сертифікатом.');
+        const expectedVersion = await serverVersion();
+        const registration = await navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' });
+        await registration.update();
+        const worker = registration.installing;
+        if (worker) await new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Завантаження триває надто довго. Перевірте зв’язок із сервером і повторіть.')), 30000);
+            const check = () => {
+                if (worker.state === 'installed' || worker.state === 'activated') { clearTimeout(timeout); resolve(); }
+                if (worker.state === 'redundant') { clearTimeout(timeout); reject(new Error('Не вдалося завантажити всі файли. Спробуйте ще раз.')); }
+            };
+            worker.addEventListener('statechange', check);
+            check();
+        });
+        if (registration.waiting) {
+            message.textContent = 'Застосовуємо оновлення…';
+            await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('Не вдалося застосувати оновлення. Повторіть спробу.')), 15000);
+                navigator.serviceWorker.addEventListener('controllerchange', () => { clearTimeout(timeout); resolve(); }, { once: true });
+                registration.waiting.postMessage({ type: 'APPLY_UPDATE' });
+            });
+        } else await navigator.serviceWorker.ready;
+        const installedVersion = await workerVersion(registration.active);
+        if (installedVersion !== expectedVersion) throw new Error(`Оновлення не встановлено: активна версія ${installedVersion}, на сервері ${expectedVersion}. Повторіть спробу.`);
+        message.textContent = `Версію ${installedVersion} встановлено. Відкриваємо суфлер…`;
+        window.location.replace(`./?version=${encodeURIComponent(installedVersion)}`);
+    } catch (error) {
+        message.textContent = error.message;
+        button.disabled = false;
+    }
+});
+</script>
+</html>
+

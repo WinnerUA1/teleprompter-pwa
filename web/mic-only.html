@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="uk"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Окрема перевірка петлички</title>
+<style>body{max-width:560px;margin:35px auto;padding:20px;background:#17191e;color:white;font:18px/1.5 system-ui}button,select{display:block;padding:15px;margin:16px 0;width:100%;font:inherit}audio{width:100%}pre{white-space:pre-wrap;font-size:14px}</style>
+<h1>Лише мікрофон</h1><p>Закрийте всі вікна суфлера. Ця сторінка не вмикає камеру й не підсилює звук. Вона перевіряє підтримувані Safari режими USB-входу.</p>
+<button id="list">1. Дозволити доступ і показати входи</button>
+<select id="input"><option value="">Системний вхід</option></select>
+<label for="profile">Режим захоплення</label><select id="profile"><option value="default">1. Звичайний Safari</option><option value="raw">2. Без обробки (обов’язково)</option><option value="mono44100">3. Без обробки · моно · 44,1 кГц</option><option value="mono48000">4. Без обробки · моно · 48 кГц</option></select>
+<button id="record" disabled>2. Записати 5 секунд</button>
+<button id="all" disabled>Перевірити всі режими · приблизно 20 секунд</button><p>Для порівняння говоріть і легко торкайтеся петлички весь час перевірки. Назва входу сама по собі не доводить, який мікрофон записує.</p>
+<p id="status" role="status">Підключіть петличку.</p><audio id="playback" controls></audio><pre id="report"></pre>
+<div id="results"></div>
+<script>
+const select = document.querySelector('#input');
+const status = document.querySelector('#status');
+const report = document.querySelector('#report');
+const list = document.querySelector('#list');
+const record = document.querySelector('#record');
+const profile = document.querySelector('#profile');
+const all = document.querySelector('#all');
+let url;
+function captureConstraints(deviceId, mode) {
+    const audio = deviceId ? {deviceId:{exact:deviceId}} : {};
+    if (mode !== 'default') audio.echoCancellation = {exact:false};
+    if (mode === 'mono44100' || mode === 'mono48000') {
+        audio.channelCount = {exact:1};
+        audio.sampleRate = {exact:mode === 'mono44100' ? 44100 : 48000};
+    }
+    return {video:false,audio:Object.keys(audio).length ? audio : true};
+}
+function showCaptureError(error, stage) {
+    status.textContent = `${stage}: ${error.name}: ${error.message}; параметр: ${error.constraint || 'браузер не вказав'}`;
+    report.textContent = JSON.stringify({stage,name:error.name,message:error.message,constraint:error.constraint || null,requested:select.selectedOptions[0]?.text,secureContext:window.isSecureContext},null,2);
+}
+function populateInputs(devices) {
+    const previous = select.value;
+    select.replaceChildren(new Option('Системний вхід', ''));
+    devices.forEach((d,index) => select.add(new Option(d.label || `Мікрофон ${index+1}`, d.deviceId)));
+    const preferred = devices.find(d=>d.deviceId===previous) || devices.find(d=>/usb|headset|headphone|external|lightning/i.test(d.label));
+    select.value = preferred?.deviceId || '';
+    record.disabled = devices.length === 0;
+    all.disabled = devices.length === 0;
+}
+list.onclick = async () => {
+    list.disabled = true;
+    let permission;
+    let accessError;
+    let devices = [];
+    try {
+        // Known inputs can be listed without opening the default microphone.
+        devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+        if (!devices.some(d=>d.label && d.deviceId)) {
+            try { permission = await navigator.mediaDevices.getUserMedia({audio:true,video:false}); }
+            catch (error) { accessError = error; }
+            // A default-input failure must not hide other available inputs.
+            devices = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput');
+        }
+        populateInputs(devices);
+        const names = devices.map((d,index)=>d.label || `Мікрофон ${index+1} (назва прихована)`);
+        report.textContent = JSON.stringify({stage:'Список входів',inputs:names,count:devices.length,permissionError:accessError ? {name:accessError.name,message:accessError.message,constraint:accessError.constraint || null}:null},null,2);
+        status.textContent = devices.length
+            ? `Браузер показав ${devices.length} входів: ${names.join(', ')}. Виберіть петличку й запустіть перевірку.`
+            : 'Браузер не надав жодного аудіовходу. Помилка доступу показана нижче.';
+    } catch (error) { showCaptureError(error, 'Отримання списку аудіовходів'); }
+    finally { permission?.getTracks().forEach(t => t.stop()); list.disabled = false; }
+};
+record.onclick = async () => {
+    await recordSample(profile.value, false);
+};
+async function recordSample(mode, appendResult) {
+    record.disabled = true; list.disabled = true; select.disabled = true;
+    profile.disabled = true; all.disabled = true;
+    let stream;
+    let finished = false;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        stream?.getTracks().forEach(t => t.stop());
+        record.disabled = false; list.disabled = false; select.disabled = false;
+        profile.disabled = false; all.disabled = false;
+    };
+    try {
+        document.querySelector('#playback').pause();
+        stream = await navigator.mediaDevices.getUserMedia(captureConstraints(select.value,mode));
+        const track = stream.getAudioTracks()[0];
+        const settings = track?.getSettings() || {};
+        report.textContent = JSON.stringify({mode,requested:select.selectedOptions[0].text,returned:track?.label,deviceMatches:select.value ? settings.deviceId === select.value : null,muted:track?.muted,state:track?.readyState,sampleRate:settings.sampleRate,channels:settings.channelCount,echoCancellation:settings.echoCancellation},null,2);
+        const type = ['audio/mp4','audio/webm'].find(t => MediaRecorder.isTypeSupported(t));
+        const recorder = type ? new MediaRecorder(stream,{mimeType:type}) : new MediaRecorder(stream);
+        const chunks = [];
+        recorder.ondataavailable = event => { if(event.data.size) chunks.push(event.data); };
+        let complete;
+        const completion = new Promise(resolve => { complete = resolve; });
+        recorder.onstop = () => {
+            const blob = new Blob(chunks,{type:recorder.mimeType});
+            if (appendResult) {
+                const card = document.createElement('section');
+                const title = document.createElement('h2');
+                title.textContent = [...profile.options].find(o=>o.value===mode).text;
+                const player = document.createElement('audio');
+                player.controls = true;
+                player.src = URL.createObjectURL(blob);
+                const details = document.createElement('pre');
+                details.textContent = report.textContent;
+                card.append(title,player,details);
+                document.querySelector('#results').append(card);
+            } else {
+                if(url) URL.revokeObjectURL(url);
+                url = URL.createObjectURL(blob);
+                document.querySelector('#playback').src = url;
+            }
+            finish();
+            status.textContent = 'Запис готовий. Від’єднайте перехідник і прослухайте. Чи чути дотики до петлички?';
+            complete();
+        };
+        recorder.onerror = event => { status.textContent = event.error?.message || 'Помилка запису'; finish(); complete(); };
+        recorder.start();
+        status.textContent = 'Говоріть і легко торкніться петлички. Записуємо 5 секунд…';
+        setTimeout(() => { if(recorder.state === 'recording') recorder.stop(); },5000);
+        await completion;
+    } catch(error) {
+        showCaptureError(error, `Запис вибраного входу (${mode})`);
+        if (appendResult) {
+            const details = document.createElement('pre');
+            details.textContent = report.textContent;
+            document.querySelector('#results').append(details);
+        }
+        finish();
+    }
+}
+all.onclick = async () => {
+    for (const mode of ['default','raw','mono44100','mono48000']) {
+        await recordSample(mode,true);
+        record.disabled = true; list.disabled = true; select.disabled = true; profile.disabled = true; all.disabled = true;
+        await new Promise(resolve=>setTimeout(resolve,400));
+    }
+    record.disabled = false; list.disabled = false; select.disabled = false; profile.disabled = false; all.disabled = false;
+    status.textContent = 'Порівняння готове. Від’єднайте перехідник і прослухайте записи нижче. Який режим записав саме дотики до петлички?';
+};
+</script></html>

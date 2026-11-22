@@ -1,0 +1,46 @@
+name: Publish teleprompter PWA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-pages.yml'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify application
+        run: |
+          node --check web/app.js
+          for test in web/*.test.cjs; do node "$test"; done
+      - name: Prepare public files
+        run: |
+          mkdir -p public
+          cp web/index.html web/styles.css web/app.js web/offline.js web/sw.js web/manifest.webmanifest web/icon-192.png web/icon-512.png web/update.html public/
+          touch public/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
